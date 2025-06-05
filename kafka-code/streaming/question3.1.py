@@ -2,7 +2,6 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import split, col, concat_ws, to_timestamp, hour, count
 from urllib.parse import urlparse
 from pyspark.sql.types import *
-from pyspark.sql.functions import *
 
 def delete_old_batches(spark, base_path):
     """
@@ -87,16 +86,17 @@ def main():
         for i, name in enumerate(columns)
     ])
 
-    # 7. Tính tỷ lệ Fraud theo "Merchant Name", "Merchant City" trên tổng số giao dịch
-    fraud_stats_df = (
+    # 7. Đếm số lượng giao dịch groupBy theo "Merchant Name", "Merchant City"
+    MerchantCount = (
         StreamingDF
         .groupBy("Merchant Name", "Merchant City")
-        .agg(
-            count("*").alias("total_transactions"),
-            sum(when(col("Is Fraud?") == "Yes", 1).otherwise(0)).alias("fraud_transactions")
+        .count()
+        .orderBy(col("count").desc())
+        .select(
+            col("Merchant Name").alias("Merchant Name"),
+            col("Merchant City").alias("Merchant City"),
+            col("count").alias("Total Transactions")
         )
-        .withColumn("fraud_rate", col("fraud_transactions") / col("total_transactions"))
-        .orderBy(col("fraud_rate").desc())
     )
 
     # 10. Hàm ghi mỗi batch ra Parquet trên HDFS
@@ -109,7 +109,7 @@ def main():
         batch_df.write.mode("overwrite").parquet(hdfs_path)
 
     # 11. Khởi streaming query
-    query = fraud_stats_df.writeStream \
+    query = MerchantCount.writeStream \
         .outputMode("complete") \
         .foreachBatch(write_to_parquet) \
         .option(

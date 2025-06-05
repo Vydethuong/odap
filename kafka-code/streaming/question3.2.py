@@ -3,6 +3,8 @@ from pyspark.sql.functions import split, col, concat_ws, to_timestamp, hour, cou
 from urllib.parse import urlparse
 from pyspark.sql.types import *
 from pyspark.sql.functions import *
+from datetime import datetime
+import requests
 
 def delete_old_batches(spark, base_path):
     """
@@ -87,16 +89,30 @@ def main():
         for i, name in enumerate(columns)
     ])
 
-    # 7. Tính tỷ lệ Fraud theo "Merchant Name", "Merchant City" trên tổng số giao dịch
-    fraud_stats_df = (
+    # 7. Lấy tỷ giá USD-VND ngày hôm nay từ api
+    response = requests.get("https://open.er-api.com/v6/latest/USD")
+    if response.status_code == 200:
+        data = response.json()
+        vnd_rate = data["rates"]["VND"]
+
+    # 8. Cột Amount đang ở định dạng "$x.y", do vậy phải loại bỏ ký tự "$" và chuyển về kiểu số double
+    StreamingDF = StreamingDF.withColumn(
+        "Amount_clean", regexp_replace("Amount", "\\$", "").cast("double")
+    )
+
+    # 9. Tính tổng số tiền giao dịch groupBy theo "Merchant Name", "Merchant City", 2 tỷ giá USD, VND
+    MerchantAmount = (
         StreamingDF
         .groupBy("Merchant Name", "Merchant City")
-        .agg(
-            count("*").alias("total_transactions"),
-            sum(when(col("Is Fraud?") == "Yes", 1).otherwise(0)).alias("fraud_transactions")
+        .agg(sum("Amount_clean").alias("Total_USD"))
+        .withColumn("Total_VND", round(col("Total_USD") * vnd_rate, 0).cast("long"))
+        .orderBy(col("Total_USD").desc())
+        .select(
+            col("Merchant Name"),
+            col("Merchant City"),
+            round(col("Total_USD"), 2).alias("Total_Transactions_USD"),
+            col("Total_VND").alias("Total_Transactions_VND")
         )
-        .withColumn("fraud_rate", col("fraud_transactions") / col("total_transactions"))
-        .orderBy(col("fraud_rate").desc())
     )
 
     # 10. Hàm ghi mỗi batch ra Parquet trên HDFS
@@ -109,7 +125,7 @@ def main():
         batch_df.write.mode("overwrite").parquet(hdfs_path)
 
     # 11. Khởi streaming query
-    query = fraud_stats_df.writeStream \
+    query = MerchantAmount.writeStream \
         .outputMode("complete") \
         .foreachBatch(write_to_parquet) \
         .option(
